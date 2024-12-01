@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS利用料を1日単位でSlackに通知するアプリ
+Parameters:
+  SlackWorkspaceId:
+    Type: String
+    Description: Slack workspace ID
+  SlackChannelId:
+    Type: String
+    Description: Slack channel ID to associate with the works
+Resources:
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      RoleName: StepFunctions-DailyAWSCostGuard-role
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - "*"
+                Action:
+                  - ce:GetCostAndUsage
+                  - SNS:Publish
+                  - bedrock:InvokeModel
+                Effect: Allow
+                Sid: AllowGetCostAndUsage
+          PolicyName: allow_aws_services
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      RoleName: DailyAWSCostGuard_Scheduler_Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  Slack:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      LoggingLevel: NONE
+      SnsTopicArns:
+        - !Ref SNSTopic
+      GuardrailPolicies:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelId
+      IamRoleArn: !GetAtt SlackRole.Arn
+      ConfigurationName: DailyAWSCostGuard
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      Definition:
+        QueryLanguage: JSONata
+        Comment: Daily AWS cost notifications via Slack
+        StartAt: SetTargetDates
+        States:
+          SetTargetDates:
+            Type: Pass
+            Next: GetCostAndUsage
+            Assign:
+              StartDate: "{% $fromMillis($toMillis($states.context.State.EnteredTime) - 24*60*60*1000,'[Y0001]-[M01]-[D01]') %}"
+              EndDate: "{% $substringBefore($states.context.State.EnteredTime, 'T') %}"
+          GetCostAndUsage:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:costexplorer:getCostAndUsage
+            Arguments:
+              Granularity: DAILY
+              Metrics:
+                - UNBLENDED_COST
+              TimePeriod:
+                Start: "{% $StartDate %}"
+                End: "{% $EndDate %}"
+              GroupBy:
+                - Type: DIMENSION
+                  Key: SERVICE
+            Assign:
+              TotalUnblendedCost: "{% $formatNumber($sum($states.result.ResultsByTime.Groups.Metrics.UnblendedCost.Amount ~> $map(function($v) {$number($v)})), '0.00') %}"
+              serviceDetailsJSON: "{% $states.result.ResultsByTime.Groups %}"
+            Next: CheckCostThreshold
+          CheckCostThreshold:
+            Type: Choice
+            Choices:
+              - Next: ServiceCostSummary
+                Condition: "{% $number($TotalUnblendedCost) > 1 %}"
+                Assign:
+                  icon: ":exclamation:"
+            Default: ServiceCostSummary
+            Assign:
+              icon: ":warning:"
+          ServiceCostSummary:
+            Type: Task
+            Resource: arn:aws:states:::bedrock:invokeModel
+            Arguments:
+              ModelId: arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0
+              Body:
+                anthropic_version: bedrock-2023-05-31
+                max_tokens: 1000
+                messages:
+                  - role: user
+                    content:
+                      - type: text
+                        text: "{% 'JSON形式のサービス使用状況を分析してください：' & $serviceDetailsJSON%}"
+            Assign:
+              serviceDetails: "{% $states.result.Body.content[0].text %}"
+            Next: SendSlackNotification
+          SendSlackNotification:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Arguments:
+              TopicArn: !Ref SNSTopic
+              Message:
+                version: "1.0"
+                source: custom
+                content:
+                  textType: client-markdown
+                  title: "{% $icon & $StartDate & 'のコスト合計：$' & $TotalUnblendedCost %}"
+                  description: "{% $serviceDetails %}"
+            End: true
+      StateMachineName: DailyAWSCostGuard
+      RoleArn: !GetAtt StateMachineRole.Arn
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: https://global.sns-api.chatbot.amazonaws.com
+          Protocol: https
+      TopicName: DailyAWSCostGuard
+
+  SlackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSResourceExplorerReadOnlyAccess
+      RoleName: Slack_DailyAWSCostGuard_Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+
+  Scheduler:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      GroupName: default
+      ScheduleExpression: cron(0 9 * * ? *)
+      Target:
+        Arn: !Ref StateMachine
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 86400
+          MaximumRetryAttempts: 185
+        RoleArn: !GetAtt EventBridgeRole.Arn
+      State: ENABLED
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      ScheduleExpressionTimezone: Asia/Tokyo
+      Name: DailyAWSCostGuard_Scheduler
