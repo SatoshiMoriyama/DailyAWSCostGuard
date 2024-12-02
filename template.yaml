@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: AWS利用料を1日単位でSlackに通知するアプリ
+Description: Notify Slack of AWS usage fees on a daily basis.
 Parameters:
   SlackWorkspaceId:
     Type: String
@@ -51,6 +51,15 @@ Resources:
             Condition:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: StepFunctionsExecutionOnly
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref StateMachine
 
   Slack:
     Type: AWS::Chatbot::SlackChannelConfiguration
