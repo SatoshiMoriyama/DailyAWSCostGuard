@@ -7,6 +7,11 @@ Parameters:
   SlackChannelId:
     Type: String
     Description: Slack channel ID to associate with the works
+  CostThreshold:
+    Type: Number
+    Description: Cost threshold for alerts (USD)
+    Default: 1
+    MinValue: 0
 Resources:
   StateMachineRole:
     Type: AWS::IAM::Role
@@ -102,14 +107,14 @@ Resources:
                 - Type: DIMENSION
                   Key: SERVICE
             Assign:
-              TotalUnblendedCost: "{% $formatNumber($sum($states.result.ResultsByTime.Groups.Metrics.UnblendedCost.Amount ~> $map(function($v) {$number($v)})), '0.00') %}"
+              totalUnblendedCost: "{% $formatNumber($sum($states.result.ResultsByTime.Groups.Metrics.UnblendedCost.Amount ~> $map(function($v) {$number($v)})), '0.00') %}"
               serviceDetailsJSON: "{% $states.result.ResultsByTime.Groups %}"
             Next: CheckCostThreshold
           CheckCostThreshold:
             Type: Choice
             Choices:
               - Next: ServiceCostSummary
-                Condition: "{% $number($TotalUnblendedCost) > 1 %}"
+                Condition: !Sub "{% $number($totalUnblendedCost) > ${CostThreshold} %}"
                 Assign:
                   icon: ":exclamation:"
             Default: ServiceCostSummary
@@ -141,7 +146,7 @@ Resources:
                 source: custom
                 content:
                   textType: client-markdown
-                  title: "{% $icon & $StartDate & 'のコスト合計：$' & $TotalUnblendedCost %}"
+                  title: "{% $icon & $StartDate & 'のコスト合計：$' & $totalUnblendedCost %}"
                   description: "{% $serviceDetails %}"
             End: true
       StateMachineName: DailyAWSCostGuard
