@@ -86,8 +86,8 @@ Resources:
             Type: Pass
             Next: GetCostAndUsage
             Assign:
-              StartDate: "{% $fromMillis($toMillis($states.context.State.EnteredTime) - 24*60*60*1000,'[Y0001]-[M01]-[D01]') %}"
-              EndDate: "{% $substringBefore($states.context.State.EnteredTime, 'T') %}"
+              StartDate: "{% $fromMillis($toMillis($states.context.State.EnteredTime) - 48*60*60*1000,'[Y0001]-[M01]-[D01]') %}"
+              EndDate: "{% $fromMillis($toMillis($states.context.State.EnteredTime) - 24*60*60*1000,'[Y0001]-[M01]-[D01]') %}}"
           GetCostAndUsage:
             Type: Task
             Resource: arn:aws:states:::aws-sdk:costexplorer:getCostAndUsage
